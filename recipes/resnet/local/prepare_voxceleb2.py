@@ -61,10 +61,13 @@ def prepare_voxceleb2(in_data: Pathlike = ".", out_data: Pathlike = ".", samplin
     out_data.mkdir(parents=True, exist_ok=True)
 
     liste = open(out_data / "liste", "w")
+    print(f"Processing VoxCeleb2...")
 
     wav_lst = get_all_files(in_data / "dev" / "aac", match_and=[".m4a"])
+    print(f"Found {len(wav_lst)} files")
 
     with ProcessPoolExecutor(num_jobs) as ex:
+        print('Lancement du traitement...')
         futures = []
 
         for segment in wav_lst:
@@ -73,7 +76,6 @@ def prepare_voxceleb2(in_data: Pathlike = ".", out_data: Pathlike = ".", samplin
         for future in tqdm( futures, total=len(futures), desc=f"Processing VoxCeleb2..."):
             name, spkid, duration, segment = future.result()
             liste.write(f"{name} {spkid} {duration} {segment}\n")
-
 
     liste.close()
 

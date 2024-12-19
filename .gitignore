@@ -1,2 +1,14 @@
 # Ignorer le répertoire kiwano.egg-info
 kiwano.egg-info/
+
+# ignorer le repertoire test
+test/
+
+# ignorer les fichier .pyc
+*.pyc
+
+# ignorer le dossier db
+recipes/resnet/db
+
+# ignorer le dossier data
+recipes/resnet/data

@@ -1478,7 +1478,7 @@ class ResNetV5(nn.Module):
 
 
 class ResNetV2(nn.Module):
-    def __init__(self, input_features=81, embed_features=256, num_classes=6000, channels=[128, 128, 256, 256], num_blocks=[3,8,18,3]):
+    def __init__(self, input_features=81, embed_features=256, num_classes=6000, channels=[128, 128, 256, 256], num_blocks=[3, 4, 6, 3]):
         super(ResNetV2, self).__init__()
 
         self.embed_features = embed_features
