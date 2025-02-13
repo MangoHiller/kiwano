@@ -26,7 +26,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 import argparse
 
-import idr_torch
+#import idr_torch
 import hostlist
 import logging
 import os
@@ -68,14 +68,34 @@ class SpeakerTrainingSegmentSet(Dataset, SegmentSet):
 
 if __name__ == '__main__':
 
-    hostnames = hostlist.expand_hostlist(os.environ['SLURM_JOB_NODELIST'])
-    os.environ["MASTER_ADDR"] = hostnames[0]
-    os.environ["MASTER_PORT"] = "29500"
-    rank = int(os.environ["SLURM_NODEID"])
+    #os.environ["MASTER_PORT"] = "29500"
+    rank = int(os.environ["SLURM_PROCID"])
+    local_rank = int(os.environ['SLURM_LOCALID'])
     world = int(os.environ["SLURM_JOB_NUM_NODES"])
+    world_size = int(os.environ["SLURM_NTASKS"])
+
+    hostnames = hostlist.expand_hostlist(os.environ['SLURM_JOB_NODELIST'])
+
+    # get IDs of reserved GPU
+    gpu_ids = os.environ['SLURM_STEP_GPUS'].split(",")
+
+    os.environ["MASTER_ADDR"] = hostnames[0]
+    os.environ['MASTER_PORT'] = str(12345 + int(min(gpu_ids)))
+
+
     master_addr = hostnames[0]
     port = int(os.environ["MASTER_PORT"])
     checkpoint = None
+
+    print(f"SLURM_JOB_NODELIST: {os.environ.get('SLURM_JOB_NODELIST', 'non défini')}")
+    print(f"Expanded hostnames: {hostnames}")
+    print(f"MASTER_ADDR: {os.environ['MASTER_ADDR']}")
+    print(f"MASTER_PORT: {os.environ['MASTER_PORT']}")
+    print(f"RANK: {rank}")
+    print(f"LOCAL_RANK: {local_rank}")
+    print(f"GPU_IDS: {gpu_ids}")
+    print(f"WORLD_SIZE: {world}")
+
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", type=int)
@@ -96,9 +116,15 @@ if __name__ == '__main__':
     if args.checkpoint:
         epochs_start = checkpoint["epochs"]
 
+    torch.cuda.set_device(local_rank)
     device = torch.device("cuda")
+    print(device)
+    print(f"Using GPU: {torch.cuda.current_device()}, Total Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9} GB")
+    print(f"Available memory: {torch.cuda.memory_reserved(0) / 1e9} GB")
 
-    torch.distributed.init_process_group(backend='nccl', init_method='env://', rank=rank, world_size=world)
+    torch.distributed.init_process_group(backend='nccl', init_method='env://', rank=rank, world_size=world_size)
+    print(f"Process {rank}/{world_size} initialized on {os.uname().nodename}.")
+    print(f"Process {dist.get_rank()} running on {os.uname().nodename}.")
 
     musan = SegmentSet()
     musan.from_dict(Path(args.musan))
@@ -134,11 +160,12 @@ if __name__ == '__main__':
 
     train_sampler = DistributedSampler(training_data, num_replicas=dist.get_world_size(), rank=dist.get_rank(), shuffle=True)
 
-    train_dataloader = DataLoader(training_data, batch_size=32, drop_last=True, shuffle=False, num_workers=15, sampler=train_sampler, pin_memory=True)
+    train_dataloader = DataLoader(training_data, batch_size=64, drop_last=True, shuffle=False, num_workers=15, sampler=train_sampler, pin_memory=True)
     iterator = iter(train_dataloader)
 
 
     resnet_model = ResNetV2()
+    print(resnet_model)
     if args.checkpoint:
         resnet_model.load_state_dict(  checkpoint["model"]  )
     resnet_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(resnet_model)
@@ -159,7 +186,7 @@ if __name__ == '__main__':
 
     scaler = torch.cuda.amp.GradScaler(enabled=True)
 
-
+    print('START TRAINING ...')
     for epochs in range(epochs_start, 150):
         iterations = 0
         train_sampler.set_epoch(epochs)

@@ -474,6 +474,37 @@ class Crop(Augmentation):
 
 
 
+class PadOrTrunc(Augmentation):
+    """
+    Tronque si plus long que max_frames,
+    Zero-pad si plus court que max_frames.
+    Renvoie un tenseur [max_frames, feat_dim].
+    """
+    def __init__(self, max_frames=350):
+        super().__init__()
+        self.max_frames = max_frames
+
+    def __call__(self, tensor: torch.Tensor):
+        """
+        tensor: shape [num_frames, feat_dim]
+        """
+        num_frames = tensor.shape[0]
+        feat_dim = tensor.shape[1]
+
+        if num_frames > self.max_frames:
+            # Tronque
+            return tensor[: self.max_frames, :]
+        elif num_frames < self.max_frames:
+            # Zero-pad
+            pad_len = self.max_frames - num_frames
+            # On crée un padding sur la même device, dtype identique
+            pad = torch.zeros((pad_len, feat_dim), dtype=tensor.dtype, device=tensor.device)
+            return torch.cat([tensor, pad], dim=0)
+        else:
+            return tensor
+
+
+
 class SpecAugment(Augmentation):
     def __init__(self,  num_t_mask=1, num_f_mask=1, max_t=10, max_f=8, prob=0.6):
         self.num_t_mask = num_t_mask

@@ -4,3 +4,4 @@ from .loss import *
 from .automodel import *
 from .MHFA import *
 from .silerovad import *
+from .efficientnet import *

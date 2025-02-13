@@ -319,8 +319,8 @@ class SEBasicBlock(nn.Module):
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = nn.BatchNorm2d(planes)
 
-        self.conv3 = conv1x1(planes, planes)
-        self.bn3 = nn.BatchNorm2d(planes)
+        """self.conv3 = conv1x1(planes, planes) #commente pour réduire a 2 conv par block
+        self.bn3 = nn.BatchNorm2d(planes)"""
 
         self.downsample = downsample
         self.stride = stride
@@ -337,9 +337,9 @@ class SEBasicBlock(nn.Module):
         out = self.activation(out)
         out = self.conv2(out)
 
-        out = self.bn3(out)
-        out = self.activation(out)
-        out = self.conv3(out)
+        """out = self.bn3(out)
+        out = self.activation(out) #commente pour réduire a 2 conv par block
+        out = self.conv3(out)"""
 
         out = self.se(out)
 
@@ -530,8 +530,8 @@ class BasicBlock(nn.Module):
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = nn.BatchNorm2d(planes)
 
-        self.conv3 = conv1x1(planes, planes)
-        self.bn3 = nn.BatchNorm2d(planes)
+        """self.conv3 = conv1x1(planes, planes) #commenté pour réduire le nombre de convolution a 2 par block
+        self.bn3 = nn.BatchNorm2d(planes)"""
 
         self.downsample = downsample
         self.stride = stride
@@ -547,9 +547,9 @@ class BasicBlock(nn.Module):
         out = self.activation(out)
         out = self.conv2(out)
 
-        out = self.bn3(out)
-        out = self.activation(out)
-        out = self.conv3(out)
+        """out = self.bn3(out)
+        out = self.activation(out) #commenté pour réduire le nombre de convolution a 2 par block
+        out = self.conv3(out)"""
 
         if self.downsample is not None:
             residual = self.downsample(x)
@@ -1530,7 +1530,7 @@ class ResNetV2(nn.Module):
 
         counts = x.shape[1] - (cumulative_sum > 0.8).float().argmax(dim=1) + 1
 
-        return count
+        return counts
 
     def forward(self, x, iden = None):
         x = self.preresnet(x)

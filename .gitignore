@@ -12,3 +12,10 @@ recipes/resnet/db
 
 # ignorer le dossier data
 recipes/resnet/data
+
+# iggnorer les poids des modèles entrainés
+recipes/resnet/exp
+
+#ignorer les logs
+*.err
+*.out
