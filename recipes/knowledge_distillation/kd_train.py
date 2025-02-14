@@ -44,7 +44,7 @@ from kiwano.augmentation import Noise, Normal, Reverb, Sometimes, Linear, CMVN, 
 from kiwano.features import Fbank
 from kiwano.utils import Pathlike
 
-# Import internes
+# Import 
 from dataset import SpeakerTrainingSegmentSet, To3Channels
 from kd_teacher_student import TeacherStudentWrapper
 from kd_loss import KDLoss, CosineEmbedLoss
@@ -135,7 +135,7 @@ def main():
     reverb.from_dict(Path(args.rirs_noises))
 
     # ------------------------------
-    # Préparer dataset => identique
+    #  dataset & dataloader
     # ------------------------------
     audio_transforms = Sometimes([
         Noise(musan_music, snr_range=[5, 15]),
@@ -149,7 +149,6 @@ def main():
         CMVN(),
         Crop(350),
         SpecAugment(),
-        # Vous pouvez décommenter si vous voulez passer en 3 canaux
         # To3Channels(),
     ])
 
@@ -241,7 +240,7 @@ def main():
         losses_total = AverageMeter()
 
         for batch_idx, (feats, iden) in enumerate(train_loader):
-            # feats : [B, time=350, freq=81] (ou [B,3, freq, time] si To3Channels)
+            # feats : [B, time=350, freq=81] 
             feats = feats.unsqueeze(1).to(device, dtype=torch.float32)  # => [B,1,350,81]
             iden = iden.to(device)
 
@@ -268,7 +267,7 @@ def main():
                 # 5) Cosine embedding
                 loss_cos = 0.0
                 if cos_loss_module is not None:
-                    # cos_label=1 => on veut qu'ils soient proches
+                    # cos_label=1 => on veut proches
                     cos_label = torch.ones(student_emb.size(0)).to(device)
                     loss_cos = cos_loss_module(student_emb, teacher_emb, cos_label)
 

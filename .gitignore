@@ -9,12 +9,27 @@ test/
 
 # ignorer le dossier db
 recipes/resnet/db
+recipes/efficientNet/db
 
 # ignorer le dossier data
 recipes/resnet/data
+recipes/efficientNet/data
+
+# ignorer le dossier des poids
+recipes/resnet/weights/saved_weights
+recipes/efficientNet/saved_weights
 
 # iggnorer les poids des modèles entrainés
 recipes/resnet/exp
+recipes/efficientNet/exp
+
+# ignorer les settings de vscode
+.vscode/settings.json
+
+#ignorer certains notebooks de test
+recipes/efficientNet/EfficientNet_Speaker_Identification_Train.ipynb
+recipes/efficientNet/Untitled-1.ipynb
+recipes/efficientNet/Untitled-1 -BACKUP-trainwork.ipynb
 
 #ignorer les logs
 *.err
