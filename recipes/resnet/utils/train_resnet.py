@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import sys
 from pathlib import Path
 from typing import Optional, Union, List
@@ -26,12 +27,12 @@ from torch.utils.data.distributed import DistributedSampler
 
 import argparse
 
-#import idr_torch
+import idr_torch
 import hostlist
 import logging
 import os
 
-
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
 def get_lr(optimizer):
@@ -52,49 +53,54 @@ class SpeakerTrainingSegmentSet(Dataset, SegmentSet):
         else:
             segment = next(val for idx, val in enumerate(self.segments.values()) if idx == segment_id_or_index)
 
-        audio, sample_rate = segment.load_audio()
-        if self.audio_transforms != None:
-            audio, sample_rate = self.audio_transforms(audio, sample_rate)
+        try:
+            audio, sample_rate = segment.load_audio()
+            
+            if audio.shape[0] == 0:
+                logger.warning(f"⚠️ Segment audio vide : {segment_id_or_index}")
+                return torch.zeros((1, 81, 350)), -1            
 
-        if self.feature_extractor != None:
-            feature = self.feature_extractor.extract(audio, sampling_rate=sample_rate)
+            if self.audio_transforms != None:
+                audio, sample_rate = self.audio_transforms(audio, sample_rate)
 
-        if self.feature_transforms != None:
-            feature = self.feature_transforms(feature)
+            if self.feature_extractor != None:
+                feature = self.feature_extractor.extract(audio, sampling_rate=sample_rate)
 
-        return feature, self.labels[ segment.spkid ]
+            if self.feature_transforms != None:
+                feature = self.feature_transforms(feature)
+
+            return feature, self.labels[ segment.spkid ]
+
+        except Exception as e:
+            logger.error(f"❌ Erreur sur le segment {segment.spkid}: {e}")
+            return torch.zeros((1, 81, 350)), -1
 
 
 
 if __name__ == '__main__':
 
-    #os.environ["MASTER_PORT"] = "29500"
-    rank = int(os.environ["SLURM_PROCID"])
-    local_rank = int(os.environ['SLURM_LOCALID'])
-    world = int(os.environ["SLURM_JOB_NUM_NODES"])
-    world_size = int(os.environ["SLURM_NTASKS"])
+    print(str(idr_torch.master_addr))
+    print(str(idr_torch.master_port))
+    print(str(idr_torch.local_rank))
 
-    hostnames = hostlist.expand_hostlist(os.environ['SLURM_JOB_NODELIST'])
+    NODE_ID = os.environ['SLURM_NODEID']
+    MASTER_ADDR = os.environ['MASTER_ADDR']
 
-    # get IDs of reserved GPU
-    gpu_ids = os.environ['SLURM_STEP_GPUS'].split(",")
-
-    os.environ["MASTER_ADDR"] = hostnames[0]
-    os.environ['MASTER_PORT'] = str(12345 + int(min(gpu_ids)))
+    if idr_torch.rank == 0:
+        print(">>> Training on ", len(idr_torch.hostname), " nodes and ", idr_torch.size, " processes, master node is ", MASTER_ADDR)
+    print("- Process {} corresponds to GPU {} of node {}".format(idr_torch.rank, idr_torch.local_rank, NODE_ID))
 
 
-    master_addr = hostnames[0]
-    port = int(os.environ["MASTER_PORT"])
     checkpoint = None
 
-    print(f"SLURM_JOB_NODELIST: {os.environ.get('SLURM_JOB_NODELIST', 'non défini')}")
+    """print(f"SLURM_JOB_NODELIST: {os.environ.get('SLURM_JOB_NODELIST', 'non défini')}")
     print(f"Expanded hostnames: {hostnames}")
     print(f"MASTER_ADDR: {os.environ['MASTER_ADDR']}")
     print(f"MASTER_PORT: {os.environ['MASTER_PORT']}")
     print(f"RANK: {rank}")
     print(f"LOCAL_RANK: {local_rank}")
     print(f"GPU_IDS: {gpu_ids}")
-    print(f"WORLD_SIZE: {world}")
+    print(f"WORLD_SIZE: {world}")"""
 
 
     parser = argparse.ArgumentParser()
@@ -107,6 +113,10 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    print("#"+" ".join( sys.argv[0:]  ))
+    print("# Started at "+time.ctime())
+    print("#")
+
 
     if args.checkpoint:
         checkpoint = torch.load(args.checkpoint, map_location={"cuda" : "cpu"})
@@ -116,7 +126,12 @@ if __name__ == '__main__':
     if args.checkpoint:
         epochs_start = checkpoint["epochs"]
 
-    torch.cuda.set_device(local_rank)
+    torch.distributed.init_process_group(backend='nccl', init_method='env://', rank=idr_torch.rank, world_size=idr_torch.size)
+
+    torch.cuda.set_device(idr_torch.local_rank)
+    gpu = torch.device("cuda")
+
+    """torch.cuda.set_device(local_rank)
     device = torch.device("cuda")
     print(device)
     print(f"Using GPU: {torch.cuda.current_device()}, Total Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9} GB")
@@ -124,7 +139,7 @@ if __name__ == '__main__':
 
     torch.distributed.init_process_group(backend='nccl', init_method='env://', rank=rank, world_size=world_size)
     print(f"Process {rank}/{world_size} initialized on {os.uname().nodename}.")
-    print(f"Process {dist.get_rank()} running on {os.uname().nodename}.")
+    print(f"Process {dist.get_rank()} running on {os.uname().nodename}.")"""
 
     musan = SegmentSet()
     musan.from_dict(Path(args.musan))
@@ -158,31 +173,48 @@ if __name__ == '__main__':
 
     training_data.from_dict(Path(args.training_corpus))
 
+    training_data.describe()
+
+    # Comptage des segments valides avant entraînement
+    valid_segments = 0
+    total_segments = len(training_data)
+
+    logger.info(f"📊 Vérification des segments : {total_segments} segments chargés.") 
+
     train_sampler = DistributedSampler(training_data, num_replicas=dist.get_world_size(), rank=dist.get_rank(), shuffle=True)
 
-    train_dataloader = DataLoader(training_data, batch_size=64, drop_last=True, shuffle=False, num_workers=15, sampler=train_sampler, pin_memory=True)
+    train_dataloader = DataLoader(training_data, batch_size=16, drop_last=True, shuffle=False, num_workers=3, sampler=train_sampler, pin_memory=True)
     iterator = iter(train_dataloader)
 
+    # Instancier le modèle
+    #  => On détermine le nombre de classes
+    num_classes = len(set(training_data.labels.values()))
+    logger.info(f"Nombre de classes (locuteurs) détecté : {num_classes}")
 
-    resnet_model = ResNetV2()
-    print(resnet_model)
+    print(f"Total GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9} GB", flush=True)
+    print(f"Allocated Memory: {torch.cuda.memory_allocated(0) / 1e9} GB", flush=True)
+    print(f"Reserved Memory: {torch.cuda.memory_reserved(0) / 1e9} GB", flush=True)
+
+    resnet_model = ResNetV2(num_classes=num_classes, num_blocks=[3,24,36,3])
+    print(resnet_model, flush=True)
     if args.checkpoint:
         resnet_model.load_state_dict(  checkpoint["model"]  )
     resnet_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(resnet_model)
-    resnet_model.to(device)
+    resnet_model.to(gpu)
 
-    resnet_model = torch.nn.parallel.DistributedDataParallel(resnet_model) #, device_ids=[args.local_rank], output_device=args.local_rank)
+    resnet_model = torch.nn.parallel.DistributedDataParallel(resnet_model, device_ids=[idr_torch.local_rank]) #, device_ids=[args.local_rank], output_device=args.local_rank)
 
     optimizer = torch.optim.SGD([{'params':resnet_model.module.preresnet.parameters(), 'weight_decay':0.0001, 'lr':0.00001},{'params':resnet_model.module.temporal_pooling.parameters(), 'weight_decay':0.0001, 'lr':0.00001},{'params':resnet_model.module.embedding.parameters(), 'weight_decay':0.0001, 'lr':0.00001},{'params':resnet_model.module.output.parameters(), 'lr':0.00001}], momentum=0.9)
     if args.checkpoint:
         optimizer.load_state_dict( checkpoint["optimizer"] )
 
-    criterion = JeffreysLoss(coeff1=0.1, coeff2=0.025)
+    criterion = torch.nn.CrossEntropyLoss() #JeffreysLoss(coeff1=0.1, coeff2=0.025)
 
     scheduler = IDRDScheduler(optimizer, num_epochs=150, initial_lr=0.2, warm_up_epoch=5, plateau_epoch=15, patience=10, factor = 5, amsmloss = 0.3)
     if args.checkpoint:
         scheduler.set_epoch( checkpoint["epochs"] )
 
+    running_loss = [np.nan for _ in range(500)]
 
     scaler = torch.cuda.amp.GradScaler(enabled=True)
 
@@ -196,8 +228,8 @@ if __name__ == '__main__':
 
             feats = feats.unsqueeze(1)
 
-            feats = feats.float().to(device)
-            iden = iden.to(device)
+            feats = feats.float().to(gpu)
+            iden = iden.to(gpu)
 
             optimizer.zero_grad()
 
@@ -212,9 +244,13 @@ if __name__ == '__main__':
 
             #loss.backward()
             #optimizer.step()
+            running_loss.pop(0)
+            running_loss.append(loss.item())
+            rmean_loss = np.nanmean(np.array(running_loss))
+
 
             if iterations%100 == 0:
-                msg = "{}: Epoch: [{}/{}] ({}/{}) \t C-Loss:{:.4f} \t LR : {:.8f} \t Margin : {:.4f}".format(time.ctime(), epochs, 150, iterations, len(train_dataloader), loss.item(), get_lr(optimizer), resnet_model.module.get_m())
+                msg = "{}: Epoch: [{}/{}] ({}/{}) \t AvgLoss:{:.4f} \t C-Loss:{:.4f} \t LR : {:.8f} \t Margin : {:.4f}".format(time.ctime(), epochs, 150, iterations, len(train_dataloader), rmean_loss, loss.item(), get_lr(optimizer), resnet_model.module.get_m())
                 print(msg)
 
             iterations += 1
@@ -226,6 +262,8 @@ if __name__ == '__main__':
                 "epochs": epochs+1,
                 "optimizer": optimizer.state_dict(),
                 "model": resnet_model.module.state_dict(),
+                "name": type(resnet_model.module).__name__,
+                "config": resnet_model.extra_repr(),
             }
             torch.save(checkpoint, args.exp_dir+"/model"+str(epochs)+".ckpt")
 

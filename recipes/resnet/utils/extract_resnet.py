@@ -109,6 +109,9 @@ if __name__ == '__main__':
 
     extracting_data.from_dict(Path(args.data_dir))
 
+    nb_segments = len(extracting_data.segments)
+    print(f"[INFO] Nombre total de segments chargés : {nb_segments}")
+
     extracting_sampler = DistributedSampler(extracting_data, num_replicas=args.world_size, rank=args.rank)
 
     extracting_dataloader = DataLoader(extracting_data, batch_size=1, num_workers=10, sampler=extracting_sampler, pin_memory=True)
@@ -116,7 +119,7 @@ if __name__ == '__main__':
 
     #resnet_model = ResNet(num_classes=18000)
     #resnet_model = ResNetV2(num_classes=18000)
-    resnet_model = ResNetV2()
+    resnet_model = ResNetV2(num_classes=6000, num_blocks=[3,4,6,3])
     #resnet_model = ResNetV5()
     #resnet_model = ResNetV3(k=3)
     #resnet_model = ResNetV4()
@@ -128,6 +131,8 @@ if __name__ == '__main__':
 
     emb = EmbeddingSet()
 
+    count_extracted = 0
+
     for feat, key in extracting_dataloader:
         feat = feat.unsqueeze(1)
 
@@ -136,10 +141,16 @@ if __name__ == '__main__':
         pred = resnet_model(feat)
 
         emb[key[0]] = torch.Tensor( pred.cpu().detach()[0] )
+        
+        count_extracted += 1
+        if count_extracted % 1000 == 0:
+            print(f"  => {count_extracted} segments extraits ...")
 
-        print("Processed x-vector for key : "+key[0])
+        #print("Processed x-vector for key : "+key[0])
 
     write_pkl(args.output_dir, emb)
+
+    print(f"[INFO] Extraction terminée. {count_extracted} segments extraits.")
 
     print("# Ended at "+time.ctime())
 

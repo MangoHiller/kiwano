@@ -9,6 +9,10 @@ from typing import Optional
 
 import argparse
 
+import ssl
+import urllib.request
+ssl._create_default_https_context = ssl._create_unverified_context #pour contourner le certif HS de DRBENCHMARK
+
 VOXCELEB2_PARTS_URL = [
     ["http://drbenchmark.univ-avignon.fr/corpus/voxceleb2/vox1a/vox2_dev_aac_partaa", "da070494c573e5c0564b1d11c3b20577"],
     ["http://drbenchmark.univ-avignon.fr/corpus/voxceleb2/vox1a/vox2_dev_aac_partab", "17fe6dab2b32b48abaf1676429cdd06f"],

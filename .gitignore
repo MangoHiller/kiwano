@@ -31,6 +31,13 @@ recipes/efficientNet/EfficientNet_Speaker_Identification_Train.ipynb
 recipes/efficientNet/Untitled-1.ipynb
 recipes/efficientNet/Untitled-1 -BACKUP-trainwork.ipynb
 
+#ignorer certains fichiers de test
+recipes/resnet/test_channels_resnet.py
+recipes/resnet/utils/train_resnet_BACKUP.py
+
+#ignorer certains scripts bash
+recipes/resnet/extract_lang.sh
+
 #ignorer les logs
 *.err
 *.out

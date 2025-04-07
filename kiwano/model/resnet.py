@@ -319,8 +319,8 @@ class SEBasicBlock(nn.Module):
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = nn.BatchNorm2d(planes)
 
-        """self.conv3 = conv1x1(planes, planes) #commente pour réduire a 2 conv par block
-        self.bn3 = nn.BatchNorm2d(planes)"""
+        self.conv3 = conv1x1(planes, planes) #commente pour réduire a 2 conv par block
+        self.bn3 = nn.BatchNorm2d(planes)
 
         self.downsample = downsample
         self.stride = stride
@@ -337,9 +337,9 @@ class SEBasicBlock(nn.Module):
         out = self.activation(out)
         out = self.conv2(out)
 
-        """out = self.bn3(out)
-        out = self.activation(out) #commente pour réduire a 2 conv par block
-        out = self.conv3(out)"""
+        out = self.bn3(out) #
+        out = self.activation(out) #commente ces 3 lignes pour réduire a 2 conv par block
+        out = self.conv3(out) #
 
         out = self.se(out)
 
@@ -530,8 +530,8 @@ class BasicBlock(nn.Module):
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = nn.BatchNorm2d(planes)
 
-        """self.conv3 = conv1x1(planes, planes) #commenté pour réduire le nombre de convolution a 2 par block
-        self.bn3 = nn.BatchNorm2d(planes)"""
+        self.conv3 = conv1x1(planes, planes) #commenté pour réduire le nombre de convolution a 2 par block
+        self.bn3 = nn.BatchNorm2d(planes)
 
         self.downsample = downsample
         self.stride = stride
@@ -547,9 +547,9 @@ class BasicBlock(nn.Module):
         out = self.activation(out)
         out = self.conv2(out)
 
-        """out = self.bn3(out)
+        out = self.bn3(out)#
         out = self.activation(out) #commenté pour réduire le nombre de convolution a 2 par block
-        out = self.conv3(out)"""
+        out = self.conv3(out)#
 
         if self.downsample is not None:
             residual = self.downsample(x)
@@ -1478,7 +1478,7 @@ class ResNetV5(nn.Module):
 
 
 class ResNetV2(nn.Module):
-    def __init__(self, input_features=81, embed_features=256, num_classes=6000, channels=[128, 128, 256, 256], num_blocks=[3, 4, 6, 3]):
+    def __init__(self, input_features=81, embed_features=256, num_classes=6000, channels=[128, 128, 256, 256], num_blocks=[3, 4, 23, 3]):
         super(ResNetV2, self).__init__()
 
         self.embed_features = embed_features
@@ -1531,6 +1531,41 @@ class ResNetV2(nn.Module):
         counts = x.shape[1] - (cumulative_sum > 0.8).float().argmax(dim=1) + 1
 
         return counts
+    
+    def extract_intermediate_features(self, x, detach_features=False):
+        """
+        Retourne les feature maps après layer1, layer2, layer3, layer4
+        sous forme d'un dict: {1: feat1, 2: feat2, 3: feat3, 4: feat4}
+        """
+        out = self.preresnet.pre_conv1(x)
+        out = self.preresnet.pre_bn1(out)
+        out = self.preresnet.pre_activation1(out)
+
+        out = self.preresnet.layer1(out)
+        feat1 = out.clone()
+        
+        if detach_features:
+            feat1 = feat1.detach()
+
+        out = self.preresnet.layer2(out)
+        feat2 = out.clone()
+
+        if detach_features:
+            feat2 = feat2.detach()
+
+        out = self.preresnet.layer3(out)
+        feat3 = out.clone()
+        
+        if detach_features:
+            feat3 = feat3.detach()
+
+        out = self.preresnet.layer4(out)
+        feat4 = out.clone()
+        
+        if detach_features:
+            feat4 = feat4.detach()
+
+        return {1: feat1, 2: feat2, 3: feat3, 4: feat4}
 
     def forward(self, x, iden = None):
         x = self.preresnet(x)
