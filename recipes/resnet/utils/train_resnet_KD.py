@@ -190,7 +190,7 @@ if __name__ == "__main__":
 
     # Spécifiques à Hinton (température + alpha)
     parser.add_argument(
-        "--temperature", type=float, default=4.0,
+        "--temperature", type=float, default=1.0,
         help="Température pour la distillation Hinton (softmax)."
     )
 
@@ -272,7 +272,7 @@ if __name__ == "__main__":
     )
     train_dataloader = DataLoader(
         training_data,
-        batch_size=32,
+        batch_size=8,
         drop_last=True,
         shuffle=False,
         num_workers=10,
@@ -285,7 +285,7 @@ if __name__ == "__main__":
     logger.info(f"Nombre de classes (locuteurs) détecté : {num_classes}")
 
     # Instanciation du modèle Student
-    resnet_model = ResNetV2(num_classes=num_classes, num_blocks=[3, 4, 6, 3])
+    resnet_model = ResNetV2(num_classes=num_classes, num_blocks=[3, 4, 6, 3], block=BasicBlock, block_se=SEBasicBlock)
     print(resnet_model, flush=True)
     if checkpoint:
         resnet_model.load_state_dict(checkpoint["model"])
@@ -332,15 +332,15 @@ if __name__ == "__main__":
 
     running_loss = [np.nan] * 500
     # --- GradScaler : Désactivé pour le debug initial ---
-    #scaler = GradScaler(enabled=True)
-    scaler = GradScaler(enabled=False) # <<< DEBUG >>> Désactiver AMP pour commencer
-    logger.warning("<<< DEBUG >>> AMP désactivé via GradScaler(enabled=False)")
+    scaler = GradScaler(enabled=True)
+    #scaler = GradScaler(enabled=False) # <<< DEBUG >>> Désactiver AMP pour commencer
+    #logger.warning("<<< DEBUG >>> AMP désactivé via GradScaler(enabled=False)")
 
     # Chargement du Teacher si --teacher_checkpoint
     teacher_model = None
     if args.teacher_checkpoint is not None and args.kd_mode is not None:
         teacher_ckpt = torch.load(args.teacher_checkpoint, map_location={"cuda": "cpu"})
-        teacher_model = ResNetV2(num_classes=5994, num_blocks=[3, 4, 23, 3])
+        teacher_model = ResNetV2(num_classes=5994, num_blocks=[3, 4, 23, 3], block=BasicBlock, block_se=SEBasicBlock)
         teacher_model.load_state_dict(teacher_ckpt["model"])
         teacher_model = nn.SyncBatchNorm.convert_sync_batchnorm(teacher_model)
         teacher_model.to(gpu)
@@ -367,16 +367,17 @@ if __name__ == "__main__":
     # C’est la forme requise pour utiliser F.kl_div(log_probs_student, probs_teacher) dans PyTorch 
     # et correspond à la formulation mathématique de la KL-Divergence pour la distillation de Hinton.
 
-    def hinton_kl_div_loss(student_logits, teacher_logits, T=4.0, eps=1e-8):
+    def hinton_kl_div_loss(student_logits, teacher_logits, T=1.0, eps=1e-8):
         """Calcule la KL-Divergence pour la distillation Hinton:
         F.kl_div( log_softmax(student/T), softmax(teacher/T) ) * T^2, en batchmean."""
         # Distribution Teacher
         teacher_probs = F.softmax(teacher_logits / T, dim=1)
         
         # Clamp pour éviter les probabilités nulles strictes
-        #teacher_probs = teacher_probs.clamp(min=eps) #A vireer si useless
+        teacher_probs = teacher_probs.clamp(min=eps) #A vireer si useless
         # Log-distribution Student
         student_log_probs = F.log_softmax(student_logits / T, dim=1)
+        student_log_probs = student_log_probs.clamp(min=eps) #A vireer si useless
 
         # KL-Div
         kl_div = F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
@@ -389,8 +390,8 @@ if __name__ == "__main__":
         return kl_div * (T * T)
     
     # --- Activer la détection d'anomalies Autograd ---
-    torch.autograd.set_detect_anomaly(True) 
-    logger.warning("<<< DEBUG >>> torch.autograd.set_detect_anomaly(True) activé")
+    #torch.autograd.set_detect_anomaly(True) 
+    #logger.warning("<<< DEBUG >>> torch.autograd.set_detect_anomaly(True) activé")
     # -------------------------------------------------
 
     print("START TRAINING ...")
@@ -403,29 +404,25 @@ if __name__ == "__main__":
         torch.distributed.barrier()  # Synchro
 
         for feats, iden in train_dataloader:
-            print(f"\n--- Iteration {iterations} (Epoch {epoch}) ---") # <<< DEBUG >>>
 
             feats = feats.unsqueeze(1).float().to(gpu)
             iden = iden.to(gpu)
 
             optimizer.zero_grad()
 
-            # Forward Student
-            with autocast(enabled=False): #mis a false pr le trainign en mode kd/debug
+            # New
+            manual_step = False 
+
+            with autocast(enabled=True): #mis a false pr le trainign en mode kd/debug
 
 
                 # --- Calcul de ce_loss (placé avant la structure if/elif) ---
-                print("<<< DEBUG >>> Calcul de student_final_logits...") # <<< DEBUG >>>
                 student_final_logits = resnet_model(feats, iden)
-                print(f"<<< DEBUG >>> student_final_logits shape: {student_final_logits.shape}") # <<< DEBUG >>>
-                if torch.isnan(student_final_logits).any(): print("<<< DEBUG >>> ❌ NaN DANS student_final_logits!") # <<< DEBUG >>>
-                print(f"<<< DEBUG >>> Calcul de ce_loss (valeur avant combinaison)...") # <<< DEBUG >>>
                 ce_loss = criterion(student_final_logits, iden)
-                print(f"<<< DEBUG >>> ce_loss: {ce_loss.item()}") # <<< DEBUG >>>
-                if torch.isnan(ce_loss).any(): print("<<< DEBUG >>> ❌ NaN DANS ce_loss!") # <<< DEBUG >>>
 
                 loss = 0.0 # Initialiser loss
                 feature_distil_loss = 0.0 # Initialiser
+                #backward_handled_internally = False # Flag pour savoir si backward a été fait dans le bloc
                 # ---------------------------------------------------------------
 
 
@@ -482,137 +479,147 @@ if __name__ == "__main__":
                 # 5) NEW DISTILLATION MODE: HINTON KD (combinaison CE + KL-Div)
                 # ----------------------------------------------------------------
                 elif args.kd_mode == "hinton_kd":
+                    manual_step = True
                     # alpha: pondération, T: température
                     alpha = args.alpha
                     T = args.temperature
-
+                    
+                    # ---------- 1ère passe  : logits AVEC marge + CE ---------
                     # 1. Obtenir les logits modifiés par la marge du Student (pour CE Loss)
                     student_margin_logits = resnet_model(feats, iden) # Logits AVEC marge
 
                     # 2. Calculer CE Loss sur les logits AVEC marge
                     ce_loss = criterion(student_margin_logits, iden)
-            
-                    # 3. Obtenir les logits BRUTS du Student (pour KD Loss)
-                    #    Pour éviter une passe complète redondante, on refait juste la dernière étape
-                    with torch.no_grad(): # Pas besoin de gradient pour cette partie si on recalcule depuis l'embedding
-                        student_emb = resnet_model(feats, None) # Récupère l'embedding 
-                    student_raw_logits = resnet_model.module.output(student_emb, None) # Logits BRUTS (sans marge)
 
-                    # Perte de classification standard (CE) sur les vrais labels
-                    #ce_loss = criterion(student_logits, iden) # 3. CE Loss sur logits BRUTS
+                    # backward partiel (grad sur tout le réseau)
+                    scaler.scale(alpha * ce_loss).backward(retain_graph=True)
+            
+                    # ---------- 2ᵉ passe : logits SANS marge + KLDiv ---------
+                    # NB: pas de no_grad -> on VEUT les gradients sur output & embed
+                    student_emb = resnet_model(feats, None)          # même réseau, nouvelle passe
+                    logits_raw = resnet_model.module.output(student_emb, None)
 
                     # Perte de distillation (KL) sur les distributions soft du teacher
                     with torch.no_grad():
                         teacher_emb = teacher_model(feats, None)
                         teacher_logits = teacher_model.output(teacher_emb, None) #on a retiré teacher_model.module.output (car l’accès à .module n’est plus nécessaire, car ce n’est plus un wrapper DDP.)
 
-                    kd_loss = hinton_kl_div_loss(student_raw_logits, teacher_logits, T=T)
+                    kd_loss = hinton_kl_div_loss(logits_raw, teacher_logits, T=T)
+
+                    # backward final
+                    scaler.scale((1-alpha) * kd_loss).backward()
+                    
+                    # step / update
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(resnet_model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+
+                    loss = alpha * ce_loss + (1-alpha) * kd_loss          # pour le log seulement
 
 
-                    # Combinaison
-                    loss = alpha * ce_loss + (1 - alpha) * kd_loss
-
-
-                
-                # 6) NEW DISTILLATION MODE: feature_mse (MSE sur feature maps + Cross-Entropy)
+                # 6) NEW DISTILLATION MODE: feature_mse (MSE sur feature maps + Cross-Entropy) 
+                # ----------------------------------------------------------
+                # Note: Cette méthode de distillation est séparée en deux passes avec backward séparés
                 elif args.kd_mode == "feature_mse":
-                    # On définit par exemple 4 blocs => [layer1..layer4]
-                    # On leur associe des poids lambda pour la pondération
-                    print("<<< DEBUG >>> Mode: feature_mse") # <<< DEBUG >>>
+                    manual_step = True
+                    # ---- hyper-paramètres locaux ------------------------------------
                     block_ids = [3, 4]
                     lambda_list = [0.5, 0.5]  # ex: plus d'importance aux couches profondes
 
+                    # --- 1) Passe 1 : Calcul et Backward pour CE Loss ---
+                    # Note: Exécute une passe avant complète juste pour cette partie
+                    student_final_logits_for_ce = resnet_model(feats, iden)
 
+                    ce_loss = criterion(student_final_logits_for_ce, iden)
 
-                    # Extraire les features Teacher (no_grad)
+                    # --- Backward pour CE Loss (pondéré par alpha) ---
+                    # Pas besoin de scaler.scale() car scaler est désactivé pour debug
+                    #scaled_ce_loss = args.alpha * ce_loss
+
+                    # Important: retain_graph=True car on va faire un autre backward pour la loss MSE
+                    #scaled_ce_loss.backward(retain_graph=True)
+                    # Les gradients pour cette partie sont maintenant accumulés dans param.grad
+
+                    scaler.scale(args.alpha * ce_loss).backward(retain_graph=True) #pour le debug
+
+                    # --- 2) Passe 2 : Calcul et Backward pour Feature MSE Loss ---
                     with torch.no_grad():
-                        print("<<< DEBUG >>> Extraction Teacher features...") # <<< DEBUG >>>
                         teacher_feats = teacher_model.extract_intermediate_features(feats, detach_features=True)
-                        #teacher_feats = {k: v.detach().clone() for k, v in teacher_model.extract_intermediate_features(feats).items()}
-
-
-                    # Extraire les features Student
-                    print("<<< DEBUG >>> Extraction Student features...") # <<< DEBUG >>>
+                    # Extraction features Student (attachées, nouvelle passe avant partielle)
                     student_feats = resnet_model.module.extract_intermediate_features(feats, detach_features=False)
-                    #student_feats = {k: v.clone() for k, v in resnet_model.module.extract_intermediate_features(feats).items()}
 
-
-                    # Calcul MSE + pondération
                     total_mse_loss = 0.0
-                    for b, weight in zip(block_ids, lambda_list):
-                        print(f"<<< DEBUG >>> Traitement Bloc {b} (poids {weight})...") # <<< DEBUG >>>
+                    for b, weight in zip(block_ids, lambda_list): # Utilisation de 'weight' ici est OK
+                        s_f = student_feats[b]
+                        t_f = teacher_feats[b]
 
-                        t_f = teacher_feats[b]  # feature map du bloc b (Teacher)
-                        s_f = student_feats[b]  # feature map du bloc b (Student)
-                        print(f"<<< DEBUG >>>   s_f shape: {s_f.shape}, t_f shape: {t_f.shape}") # <<< DEBUG >>>
-                        if torch.isnan(s_f).any(): print(f"<<< DEBUG >>>   ❌ NaN DANS s_f (bloc {b})!") # <<< DEBUG >>>
-                        
-                        #Calcul MSE
-                        print(f"<<< DEBUG >>>   Calcul block_mse...") # <<< DEBUG >>>
-                        block_mse = F.mse_loss(s_f, t_f, reduction="mean")
-                        print(f"<<< DEBUG >>>   block_loss (bloc {b}): {block_mse.item()}") # <<< DEBUG >>>
-                        if torch.isnan(block_mse).any(): print(f"<<< DEBUG >>>   ❌ NaN DANS block_loss (bloc {b})!") # <<< DEBUG >>>
+                        # Utilisation de mse_criterion défini plus haut
+                        block_loss = mse_criterion(s_f, t_f)
 
+                        total_mse_loss += weight * block_loss # Accumulation pondérée
 
-                        # On multiplie par le poids lambda
-                        total_mse_loss = total_mse_loss + weight * block_mse  # Évite la modification in-place
-                        print(f"<<< DEBUG >>>   total_feature_loss intermédiaire: {total_mse_loss.item()}") # <<< DEBUG >>>
-                        if torch.isnan(total_mse_loss).any(): print(f"<<< DEBUG >>>   ❌ NaN DANS total_feature_loss après bloc {b}!") # <<< DEBUG >>>
+                    # feature_distil_loss est le terme MSE total pondéré
+                    feature_distil_loss = total_mse_loss
 
-                    print(f"<<< DEBUG >>> feature_mse_loss finale: {total_mse_loss.item()}") # <<< DEBUG >>>
+                    # --- Backward pour Feature MSE Loss (pondéré par 1-alpha) ---
+                    # Pas besoin de scaler.scale()
+                    #scaled_feature_loss = (1 - args.alpha) * feature_distil_loss
 
-                    # Cross-Entropy Loss sur les vraies classes (tâche principale)
-                    #ce_loss = F.cross_entropy(resnet_model(feats, iden), iden) #de base ?
-                    ce_loss = criterion(resnet_model(feats, iden), iden)
+                    scaler.scale((1 - args.alpha) * feature_distil_loss).backward()
 
-                    # Combinaison des deux pertes
-                    loss = args.alpha * ce_loss + (1 - args.alpha) * total_mse_loss
-                    print(f"<<< DEBUG >>> Loss combinée: {loss.item()} (alpha={args.alpha}, ce={ce_loss.item()}, feat={total_mse_loss.item()})") # <<< DEBUG >>>
-                    if torch.isnan(loss).any(): print("<<< DEBUG >>> ❌ NaN DANS loss finale!") # <<< DEBUG >>>
+                    # Le graphe de la CE Loss n'est plus pertinent, mais le graphe de la feature loss est utilisé ici.
+                    # Pas besoin de retain_graph=True car c'est le dernier backward pour cette itération.
+                    #scaled_feature_loss.backward()
+                    # Les gradients de cette partie sont maintenant ajoutés à ceux de la CE loss dans param.grad
+
+                    # --- Perte combinée (pour logging/affichage uniquement) ---
+                    # Calculer la valeur non-scalée pour le log basé sur les composantes
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(resnet_model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+
+                    loss = args.alpha * ce_loss + (1 - args.alpha) * feature_distil_loss
+
+                    #backward_handled_internally = True # Indiquer que backward est fait
+
+                # --- Fin du bloc feature_mse ---
                 
                 # 7) --- NEW DISTILLATION MODE: feature_cos (COS feature maps + CE)---
                 elif args.kd_mode == "feature_cos":
-
+                    manual_step = True
                     block_ids = [3, 4]
                     lambda_list = [0.5, 0.5]  # ex: plus d'importance aux couches profondes
-
-                    # Extraction features Teacher (détachées)
-                    with torch.no_grad():
-                        teacher_inter_feats = teacher_model.extract_intermediate_features(feats, detach_features=True)
-                    # Extraction features Student (attachées)
-                    student_inter_feats = resnet_model.module.extract_intermediate_features(feats, detach_features=False)
-
-                    total_feature_loss = 0.0
-                    for b, weight in zip(block_ids, lambda_list):
-                        s_f = student_inter_feats[b]
-                        t_f = teacher_inter_feats[b]
-
-                        # Vérif dimensions spatiales
-                        if s_f.shape[2:] != t_f.shape[2:]:
-                            logger.warning(f"Différence spatiale bloc {b}. S:{s_f.shape} T:{t_f.shape}. Aplatissement nécessaire.")
-                            # Potentiellement ajouter un AdaptiveAvgPool2d ici si nécessaire avant flatten
-                            # s_f = F.adaptive_avg_pool2d(s_f, (1, 1))
-                            # t_f = F.adaptive_avg_pool2d(t_f, (1, 1))
-
-                        # Aplatir pour CosineEmbeddingLoss (N, C, H, W) -> (N, C*H*W) ou (N*H*W, C)
-                        # (N, C*H*W) est plus simple pour CosineEmbeddingLoss qui attend (N, D)
-                        s_f_flat = s_f.view(s_f.size(0), -1)
-                        t_f_flat = t_f.view(t_f.size(0), -1)
-
-                        # Target = 1 pour maximiser similarité
-                        target = torch.ones(s_f_flat.size(0), device=gpu)
-                        block_loss = cos_criterion_features(s_f_flat, t_f_flat, target)
-
-                        # Pondération et accumulation
-                        #weight = args.feature_weights[b]
-                        total_feature_loss = total_feature_loss + weight * block_loss
                     
-                    # Cross-Entropy Loss sur les vraies classes (tâche principale)
-                    student_final_logits_for_ce = resnet_model(feats, iden)
-                    ce_loss = criterion(student_final_logits_for_ce, iden)
+                    # ---------- 1) Passe 1: passe : CE (logits complets) ----------------------
+                    logits_ce  = resnet_model(feats, iden)
+                    ce_loss    = criterion(logits_ce, iden)
+                    scaler.scale(args.alpha * ce_loss).backward(retain_graph=True)   # gardez le graphe ▼
 
-                    feature_distil_loss = total_feature_loss
-                    loss = args.alpha * ce_loss + (1 - args.alpha) * feature_distil_loss
+                    # ---------- 2ᵉ passe : CosineEmbeddingLoss sur features ----------
+                    with torch.no_grad():
+                        t_feats = teacher_model.extract_intermediate_features(feats, detach_features=True)
+
+                    s_feats = resnet_model.module.extract_intermediate_features(feats, detach_features=False)
+
+                    cos_loss = 0.0
+                    for b, w in zip(block_ids, lambda_list):
+                        s  = s_feats[b].view(s_feats[b].size(0), -1)   # (N, C·H·W) <-- le view(N, -1) sert pr convertir la map (C, H, W) en (N, C.H.W) pr calculer la dist cos
+                        t  = t_feats[b].view(t_feats[b].size(0), -1)
+
+                        target = torch.ones(s.size(0), device=gpu)        # même classe = +1
+                        cos_loss = cos_loss + w * cos_criterion_features(s, t, target)
+
+                    scaler.scale((1-args.alpha) * cos_loss).backward()          # backward final
+
+                    # ---------- step / update (identique à feature_mse) --------------
+                    scaler.unscale_(optimizer)
+                    #torch.nn.utils.clip_grad_norm_(resnet_model.parameters(), 1.0) #test de desactiver la clipping de la norme
+                    scaler.step(optimizer)
+                    scaler.update()
+
+                    loss = args.alpha * ce_loss + (1-args.alpha) * cos_loss              # log only
                 # ----------------------------------------------------------
 
                 else:
@@ -620,37 +627,15 @@ if __name__ == "__main__":
                     preds = resnet_model(feats, iden)
                     loss = criterion(preds, iden)
 
-            print("<<< DEBUG >>> Appel de loss.backward()...")
-            scaler.scale(loss).backward()
-            print("<<< DEBUG >>> loss.backward() terminé.") 
-            
-            print("<<< DEBUG >>> Vérification des gradients...")
-            found_nan_grad = False
-            max_grad_norm = 0.0
-            for name, param in resnet_model.named_parameters():
-                if param.grad is not None:
-                    if torch.isnan(param.grad).any():
-                        print(f"<<< DEBUG >>> ❌ NaN DÉTECTÉ DANS GRADIENT de {name}") # <<< DEBUG >>>
-                        found_nan_grad = True
-                    else:
-                         # Calculer la norme L2 du gradient pour ce paramètre
-                         param_norm = param.grad.data.norm(2).item()
-                         max_grad_norm = max(max_grad_norm, param_norm)
-                         # Afficher si la norme est très grande (ex > 1000)
-                         if param_norm > 1000:
-                              print(f"<<< DEBUG >>>   Gradient élevé pour {name}: Norme L2 = {param_norm:.4f}") # <<< DEBUG >>>
-            print(f"<<< DEBUG >>> Vérification gradients terminée. NaN trouvé: {found_nan_grad}. Norme Max observée: {max_grad_norm:.4f}") # <<< DEBUG >>>
-                  
-            #for name, param in resnet_model.named_parameters():
-            #    if param.grad is not None and torch.isnan(param.grad).any():
-            #        print(f"❌ NaN detected in gradients of {name}", flush=True)
-            scaler.unscale_(optimizer)
-            #torch.nn.utils.clip_grad_norm_(resnet_model.parameters(), 1.0) # A VIRER obj cliper les gradient
-            print("<<< DEBUG >>> Appel de clip_grad_norm_...") # <<< DEBUG >>>
-            torch.nn.utils.clip_grad_norm_(resnet_model.parameters(), max_norm=1.0)  # pzreil a retirer si pas de HInton KD
-            print("<<< DEBUG >>> Appel de optimizer.step()...") # <<< DEBUG >>>
-            scaler.step(optimizer)
-            scaler.update()
+            # ---------- FIN DES MODES ---------------------------------------
+
+            # === chemin générique : un seul backward/step ======================
+            if not manual_step:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(resnet_model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
 
             running_loss.pop(0)
             running_loss.append(loss.item())

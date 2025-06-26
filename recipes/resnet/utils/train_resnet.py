@@ -14,7 +14,7 @@ from kiwano.utils import Pathlike
 from kiwano.features import Fbank
 from kiwano.augmentation import Augmentation, Noise, Codec, Filtering, Normal, Sometimes, Linear, CMVN, Crop, SpecAugment, Reverb
 from kiwano.dataset import Segment, SegmentSet
-from kiwano.model import ResNetV2, IDRDScheduler, JeffreysLoss
+from kiwano.model import ResNetV2, IDRDScheduler, JeffreysLoss, MiniBasicBlock, MiniSEBasicBlock, BasicBlock, SEBasicBlock
 
 import soundfile as sf
 
@@ -38,6 +38,41 @@ logger = logging.getLogger(__name__)
 def get_lr(optimizer):
     for param_group in optimizer.param_groups:
         return param_group['lr']
+
+def get_resnet_model(model_size: str, num_classes: int, width_mult: float = 1.0):
+    """Retourne un ResNetV2 configuré pour la taille demandée."""
+    base_channels = {
+        "resnet18":  [128, 128, 256, 256],
+        "resnet36":  [128, 128, 256, 256],
+        "resnet50":  [128, 128, 256, 256],
+        "resnet101eq": [128, 128, 256, 256],
+        "resnet101": [128, 128, 256, 256],
+        "resnet200": [128, 128, 256, 256],
+        "resnet400": [128, 128, 256, 256],
+        "resnet800": [128, 128, 256, 256],
+    }
+
+    resnet_config = {
+        "resnet18": ([2, 2, 2, 2], MiniBasicBlock, MiniSEBasicBlock),
+        "resnet36": ([3, 4, 6, 3], MiniBasicBlock, MiniSEBasicBlock),
+        "resnet50": ([3, 4, 6, 3], BasicBlock, SEBasicBlock),
+        "resnet101": ([3, 4, 23, 3], BasicBlock, SEBasicBlock),
+        "resnet101eq": ([3, 13, 14, 3], BasicBlock, SEBasicBlock), 
+        "resnet200": ([3, 24, 36, 3], BasicBlock, SEBasicBlock),
+        "resnet400": ([4, 44, 87, 4], BasicBlock, SEBasicBlock),
+        "resnet800": ([8, 88, 174, 8], BasicBlock, SEBasicBlock),
+    }
+    if model_size not in resnet_config:
+        raise ValueError(f"model_size invalide ({model_size}), choix possibles : {list(resnet_config)}")
+    num_blocks, block, block_se = resnet_config[model_size]
+    channels = [int(c * width_mult) for c in base_channels[model_size]]
+    return ResNetV2(
+        num_classes=num_classes,
+        channels=channels,
+        num_blocks=num_blocks,
+        block=block,
+        block_se=block_se
+    )
 
 class SpeakerTrainingSegmentSet(Dataset, SegmentSet):
     def __init__(self, audio_transforms: List[Augmentation] = None, feature_extractor = None, feature_transforms: List[Augmentation] = None):
@@ -108,8 +143,27 @@ if __name__ == '__main__':
     parser.add_argument("--musan", type=str, default="data/musan/")
     parser.add_argument("--rirs_noises", type=str, default = "data/rirs_noises/")
     parser.add_argument("--checkpoint", type=str)
+    parser.add_argument("--model_size",
+                        type=str,
+                        choices=["resnet18","resnet36","resnet50","resnet101","resnet101eq","resnet200","resnet400","resnet800"],
+                        default="resnet18",
+                        help="Taille du modèle à entraîner")
+    parser.add_argument("--width_mult", type=float, default=1.0, help="Multiplicateur sur la largeur (nombre de channels) des couches du ResNet.") #permet de faire varier la largeur du modèle, facteur sur les features map.
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=64,
+        help="Batch size par GPU"
+    )
+    parser.add_argument(
+        "--nb_worker",
+        type=int,
+        default=10,
+        help="Nbr de worker"
+    )
     parser.add_argument("training_corpus", type=str, metavar="training_corpus")
     parser.add_argument("exp_dir", type=str, metavar="exp_dir")
+
 
     args = parser.parse_args()
 
@@ -183,7 +237,7 @@ if __name__ == '__main__':
 
     train_sampler = DistributedSampler(training_data, num_replicas=dist.get_world_size(), rank=dist.get_rank(), shuffle=True)
 
-    train_dataloader = DataLoader(training_data, batch_size=16, drop_last=True, shuffle=False, num_workers=3, sampler=train_sampler, pin_memory=True)
+    train_dataloader = DataLoader(training_data, batch_size=args.batch_size, drop_last=True, shuffle=False, num_workers=args.nb_worker, sampler=train_sampler, pin_memory=True)
     iterator = iter(train_dataloader)
 
     # Instancier le modèle
@@ -195,7 +249,13 @@ if __name__ == '__main__':
     print(f"Allocated Memory: {torch.cuda.memory_allocated(0) / 1e9} GB", flush=True)
     print(f"Reserved Memory: {torch.cuda.memory_reserved(0) / 1e9} GB", flush=True)
 
-    resnet_model = ResNetV2(num_classes=num_classes, num_blocks=[3,24,36,3])
+    #resnet_model = ResNetV2(num_classes=num_classes, num_blocks=[3,24,36,3]) #instantiate resnet200
+    #resnet_model = ResNetV2(num_classes=num_classes, num_blocks=[3, 4, 6, 3], block=MiniBasicBlock, block_se=MiniSEBasicBlock)
+    #resnet_model = ResNetV2(num_classes=num_classes, num_blocks=[8, 88, 174, 8], block=BasicBlock, block_se=SEBasicBlock) #train resnet800
+    #resnet_model = ResNetV2(num_classes=num_classes, num_blocks=[4, 44, 87, 4], block=BasicBlock, block_se=SEBasicBlock) #train resnet400
+
+    resnet_model = get_resnet_model(args.model_size, num_classes=num_classes, width_mult=args.width_mult)
+
     print(resnet_model, flush=True)
     if args.checkpoint:
         resnet_model.load_state_dict(  checkpoint["model"]  )

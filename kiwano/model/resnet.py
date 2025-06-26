@@ -3,6 +3,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import inspect
+
+
 
 def conv3x3(in_planes, out_planes, stride=1):
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
@@ -346,7 +349,8 @@ class SEBasicBlock(nn.Module):
         if self.downsample is not None:
             residual = self.downsample(x)
 
-        out += residual
+        #out += residual # Opération inplace peut causer souci
+        out = out + residual #correction de l'opé in place
 
         return out
 
@@ -554,7 +558,10 @@ class BasicBlock(nn.Module):
         if self.downsample is not None:
             residual = self.downsample(x)
         
-        out += residual
+        # out += residual   # Opération inplace peut poser souci
+        out = out + residual #<<<corect
+
+
         
         return out
 
@@ -1185,11 +1192,14 @@ class PreResNetV3(nn.Module):
 
 
 class PreResNet(nn.Module):
-    def __init__(self, channels=[128, 128, 256, 256], num_blocks=[3,8,18,3]):
+    def __init__(self, channels=[128, 128, 256, 256], num_blocks=[3,8,18,3], block=BasicBlock, block_se=SEBasicBlock):
         super(PreResNet, self).__init__()
 
         self.channels = channels
         self.num_blocks = num_blocks
+
+        self.block = block      #permet de choirsir le type de block MiniBasic ou BasicBlock
+        self.block_se = block_se #permet de choisir le type de block MiniSE ou SEBasic
 
         self.pre_conv1 = nn.Conv2d(1, channels[0], 3, 1, 1, bias=False)
         self.pre_bn1 = nn.BatchNorm2d(channels[0])
@@ -1216,10 +1226,23 @@ class PreResNet(nn.Module):
             )
 
         layers = []
-        layers.append(SEBasicBlock(inchannel, outchannel, 1, stride, downsample))
+        #layers.append(SEBasicBlock(inchannel, outchannel, 1, stride, downsample))
+        # Vérifie si 'reduction' est dans les arguments du constructeur
+        if 'reduction' in inspect.signature(self.block_se).parameters:
+            layers.append(self.block_se(inchannel, outchannel, reduction=1, stride=stride, downsample=downsample))
+        else:
+            layers.append(self.block_se(inchannel, outchannel, stride=stride, downsample=downsample))
 
         for i in range(1, block_num):
-            layers.append(SEBasicBlock(outchannel, outchannel, 1))
+            if 'reduction' in inspect.signature(self.block_se).parameters:
+                layers.append(self.block_se(outchannel, outchannel, 1))
+            else:
+                layers.append(self.block_se(outchannel, outchannel))
+
+        #layers.append(self.block_se(inchannel, outchannel, 1, stride, downsample)) #permet de choisir le type de block Mini ou SEMini
+
+        #for i in range(1, block_num):
+        #    layers.append(SEBasicBlock(outchannel, outchannel, 1))
         return nn.Sequential(*layers)
 
 
@@ -1232,10 +1255,11 @@ class PreResNet(nn.Module):
             )
 
         layers = []
-        layers.append(BasicBlock(inchannel, outchannel, stride, downsample))
+        #layers.append(BasicBlock(inchannel, outchannel, stride, downsample))
+        layers.append(self.block(inchannel, outchannel, stride, downsample)) 
 
         for i in range(1, block_num):
-            layers.append(BasicBlock(outchannel, outchannel))
+            layers.append(self.block(outchannel, outchannel))
         return nn.Sequential(*layers)
 
     def forward(self, x, iden = None):
@@ -1478,7 +1502,7 @@ class ResNetV5(nn.Module):
 
 
 class ResNetV2(nn.Module):
-    def __init__(self, input_features=81, embed_features=256, num_classes=6000, channels=[128, 128, 256, 256], num_blocks=[3, 4, 23, 3]):
+    def __init__(self, input_features=81, embed_features=256, num_classes=6000, channels=[128, 128, 256, 256], num_blocks=[3, 4, 23, 3], block=BasicBlock, block_se=SEBasicBlock):
         super(ResNetV2, self).__init__()
 
         self.embed_features = embed_features
@@ -1486,7 +1510,12 @@ class ResNetV2(nn.Module):
         self.channels = channels
         self.num_blocks = num_blocks
 
-        self.preresnet = PreResNet(self.channels, self.num_blocks)
+        self.block = block
+        self.block_se = block_se
+
+        #self.preresnet = PreResNet(self.channels, self.num_blocks) #instantiate old preresnet without block specification
+        self.preresnet = PreResNet(self.channels, self.num_blocks, block=self.block, block_se=self.block_se)
+
 
         self.temporal_pooling = ASTP(channels[3] * 11, channels[3]//2)
 
